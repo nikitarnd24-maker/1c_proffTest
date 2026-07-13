@@ -37,6 +37,7 @@ select{padding:8px;border-radius:8px;border:1px solid #ccc;font-size:15px;max-wi
 .result .big{font-size:34px;font-weight:800;margin:10px 0}
 .pass{color:#1a9c3e}.fail{color:var(--r)}
 .dots{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.dot.click{cursor:pointer}
 .dot{width:22px;height:22px;border-radius:50%;background:#ddd;font-size:12px;display:flex;align-items:center;justify-content:center;color:#555}
 .dot.ok{background:#1a9c3e;color:#fff}.dot.bad{background:var(--r);color:#fff}.dot.cur{outline:3px solid var(--y)}
 .fuzzy{color:#b06f00;font-size:12px}
@@ -67,6 +68,7 @@ footer{color:#999;font-size:12px;text-align:center;padding:16px}
  <div id="opts"></div>
  <div id="refbox" style="display:none;margin-top:12px;background:#fffbe6;border-left:5px solid var(--y);border-radius:8px;padding:12px;font-size:14px;line-height:1.5"></div>
  <div class="bar">
+  <button class="btn-g" id="prevBtn" style="display:none" onclick="prev()">← Назад</button>
   <button class="btn-r" id="answerBtn" style="display:none" onclick="commitMulti()">Ответить</button>
   <button class="btn-g" id="refBtn" style="display:none" onclick="toggleRef()">💡 Справка</button>
   <button class="btn-y" id="nextBtn" style="display:none" onclick="next()">Дальше →</button>
@@ -98,12 +100,12 @@ sel.innerHTML = '<option value="all">Весь банк ('+Q.length+')</option>' 
   Object.keys(bySec).sort((a,b)=>a-b).map(s=>
    '<option value="'+s+'">'+s+'. '+SEC[s]+' ('+bySec[s].length+')</option>').join('');
 
-let mode, list, pos, right, wrong, results, deadline, tick;
+let mode, list, pos, right, wrong, results, deadline, tick, snaps, frontier;
 
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 
 // «комбо»-варианты: «верны 1 и 3», «все утверждения верны», «нет правильного ответа»…
-const COMBO_RE = /^\s*(верн[ыоа]?|нет\s+(правильн|верн)|(все|всё)\s+(вышеперечисленн|перечисленн|варианты|ответы|утверждени|значени)|(оба|обе)\s+(утвержден|ответ|вариант|высказыван)|любым\s+из\s+(представленн|перечисленн)|правильны\s+все|справедливо\s+все|возможны\s+оба)/i;
+const COMBO_RE = /^\s*(верн[ыоа]?[\s,]|нет\s+(правильн|верн)|(все|всё)\s+(вышеперечисленн|перечисленн|варианты|ответы|утверждени|значени)|(оба|обе)\s+(утвержден|ответ|вариант|высказыван)|любым?\s+из|одновременно\s+(должны|включ)|включен[а-яё]*\s+вариант|варианты?\s*\d|правильн[а-яё]*\s+(ответ|вариант)|допустим[а-яё]*\s+вариант|справедливо\s+все|возможны\s+оба)/i;
 // комбо ссылается на позиции? (цифры или порядковые слова)
 const POS_RE = /\d|перв|втор|треть|четверт|пят/i;
 function orderOpts(q){
@@ -174,6 +176,7 @@ function roundInfo(){
 
 function begin(){
   pos=0; right=0; wrong=0;
+  snaps=new Array(list.length).fill(null); frontier=0;
   document.getElementById('menu').style.display='none';
   document.getElementById('resultCard').style.display='none';
   document.getElementById('quiz').style.display='block';
@@ -193,7 +196,9 @@ function render(){
     (q.img?' <span class="fuzzy">🖼 рисунок в книге — сверься с изданием</span>':'') +
     (q.correct.length>1?' <span class="badge">несколько ответов</span>':'');
   document.getElementById('qtext').textContent = q.q;
-  curOrder = orderOpts(q);
+  frontier = Math.max(frontier, pos);
+  if(!snaps[pos]) snaps[pos] = {order: orderOpts(q), chosen: null};
+  curOrder = snaps[pos].order;
   curCorrectSet = new Set(q.correct);
   const multi = q.correct.length>1;
   const box = document.getElementById('opts'); box.innerHTML='';
@@ -209,6 +214,8 @@ function render(){
   document.getElementById('nextBtn').style.display='none';
   document.getElementById('refbox').style.display='none';
   document.getElementById('refBtn').style.display='none';
+  if(snaps[pos].chosen) replay(new Set(snaps[pos].chosen));
+  document.getElementById('prevBtn').style.display = pos>lowBound() ? 'inline-block':'none';
   updScore();
   drawDots();
 }
@@ -227,24 +234,41 @@ function commitMulti(){
   if(!chosen.size) return;
   finishQ(chosen);
 }
-function finishQ(chosen){
-  answered=true;
-  const ok = chosen.size===curCorrectSet.size && [...chosen].every(x=>curCorrectSet.has(x));
-  ok?right++:wrong++;
-  if(mode==='learn' && ok) roundRight++;
-  results[pos]=ok;
+function paintAnswered(chosen){
   document.querySelectorAll('#opts .opt').forEach(el=>{
     const oi=+el.dataset.oi;
     el.classList.add('locked');
     if(curCorrectSet.has(oi)) el.classList.add('correct');
     else if(chosen.has(oi)) el.classList.add('wrong');
     else el.classList.add('dim');
-    el.querySelector('input').disabled=true;
+    const inp=el.querySelector('input');
+    inp.disabled=true; inp.checked=chosen.has(oi);
   });
   document.getElementById('answerBtn').disabled=true;
-  const rb=document.getElementById('refBtn'); rb.style.display='inline-block';
-  if(!ok) showRef(ok); else refPrepared=ok;
+  document.getElementById('refBtn').style.display='inline-block';
   document.getElementById('nextBtn').style.display='inline-block';
+}
+function replay(chosen){ // повторный показ уже отвеченного вопроса
+  answered=true;
+  const ok = results[pos]===true;
+  paintAnswered(chosen);
+  if(!ok) showRef(ok);
+}
+function lowBound(){
+  return (mode==='learn' && rounds) ? roundInfo().startIdx : 0;
+}
+function prev(){
+  if(pos>lowBound()){ pos--; render(); }
+}
+function finishQ(chosen){
+  answered=true;
+  const ok = chosen.size===curCorrectSet.size && [...chosen].every(x=>curCorrectSet.has(x));
+  ok?right++:wrong++;
+  if(mode==='learn' && ok) roundRight++;
+  results[pos]=ok;
+  snaps[pos].chosen=[...chosen];
+  paintAnswered(chosen);
+  if(!ok) showRef(ok); else refPrepared=ok;
   updScore(); drawDots();
   if(mode==='exam'){
     const done = results.filter(r=>r!==null).length;
@@ -300,6 +324,7 @@ function toggleRef(){
   else box.style.display='none';
 }
 function next(){
+  if(pos<frontier){ pos++; render(); return; }
   if(mode==='learn' && rounds){
     const ri = roundInfo();
     const lastInRound = (pos-ri.startIdx+1)===ri.size;
@@ -334,10 +359,15 @@ function updScore(){
 function drawDots(){
   const d=document.getElementById('dots');
   if(list.length>60){d.innerHTML='';return;}
+  const lo=lowBound();
   d.innerHTML = list.map((_,i)=>{
     let c='dot'; if(results[i]===true)c+=' ok'; if(results[i]===false)c+=' bad'; if(i===pos)c+=' cur';
-    return '<div class="'+c+'">'+(i+1)+'</div>';
+    const can = i>=lo && i<=frontier;
+    return '<div class="'+c+(can?' click':'')+'"'+(can?' onclick="jump('+i+')"':'')+'>'+(i+1)+'</div>';
   }).join('');
+}
+function jump(i){
+  if(i>=lowBound() && i<=frontier){ pos=i; render(); }
 }
 function finishExam(timeout){
   clearInterval(tick);
